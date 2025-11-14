@@ -1,5 +1,14 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+/**
+ * AI Sales Agent - Frontend React Application
+ * 
+ * SPDX-License-Identifier: MIT
+ * Copyright (c) 2025 killin24
+ * 
+ * This file is part of the AI Sales Agent project.
+ * Licensed under the MIT License. See LICENSE file in the project root.
+ */
+import { useState, useEffect, useRef, useCallback } from "react";
+import { motion } from "framer-motion";
 import "./App.css";
 import AgoraRTC from "agora-rtc-sdk-ng";
 import { createClient } from '@supabase/supabase-js';
@@ -18,6 +27,49 @@ function App() {
   ]);
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
+  const [selectedFile, setSelectedFile] = useState(null);
+  
+    // Upload a recording file (audio/video) to backend for transcription
+    const uploadRecording = useCallback(async (file) => {
+      if (!file) return;
+      try {
+        const form = new FormData();
+        form.append('file', file);
+        form.append('userId', user?.id || '');
+        form.append('channel', CHANNEL);
+
+        const resp = await fetch(`${BACKEND_URL}/transcribe`, {
+          method: 'POST',
+          body: form,
+        });
+
+        const data = await resp.json().catch((e) => ({ error: 'Invalid JSON response', detail: e.message }));
+
+        if (!resp.ok) {
+          console.error('Server error during transcribe:', resp.status, data);
+          const errMsg = data.error || data.message || JSON.stringify(data);
+          setMessages((prev) => [
+            ...prev,
+            { sender: 'bot', text: `Transcription failed: ${errMsg}` },
+          ]);
+          return;
+        }
+
+        const transcript = data.transcript || data;
+
+        setMessages((prev) => [
+          ...prev,
+          { sender: 'bot', text: 'Transcript saved.' },
+          { sender: 'bot', text: transcript },
+        ]);
+      } catch (err) {
+        console.error('Upload/transcribe error:', err);
+        setMessages((prev) => [
+          ...prev,
+          { sender: 'bot', text: 'Failed to upload/transcribe recording.' },
+        ]);
+      }
+    }, [user, setMessages]);
   const chatEndRef = useRef(null);
   const [showDashboardOnly, setShowDashboardOnly] = useState(false); // New state for dashboard toggle
   const [isLeadOnline, setIsLeadOnline] = useState(false); // New state for lead online status
@@ -26,7 +78,7 @@ function App() {
 
   // Agora States
   const [agoraClient, setAgoraClient] = useState(null);
-  const [localAudioTrack, setLocalAudioTrack, ] = useState(null);
+  const [localAudioTrack, setLocalAudioTrack] = useState(null);
   const [localVideoTrack, setLocalVideoTrack] = useState(null);
   const [remoteUsers, setRemoteUsers] = useState({});
   const [inCall, setInCall] = useState(false);
@@ -42,8 +94,8 @@ function App() {
 
   // Agora Constants
   const APP_ID = process.env.REACT_APP_AGORA_APP_ID; // <<< IMPORTANT: Replace with your Agora App ID
-  const TOKEN = null; // Set to null for now, will be fetched from backend
   const CHANNEL = "main";
+  const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || 'http://localhost:5000';
 
   // Supabase Auth and Session Management
   useEffect(() => {
@@ -54,7 +106,7 @@ function App() {
     });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      (event, session) => {
+      (_event, session) => {
         setSession(session);
         setUser(session?.user ?? null);
         setIsLeadOnline(!!session?.user); // Update lead online status on auth change
@@ -89,7 +141,7 @@ function App() {
     const checkGoogleCalendarStatus = async () => {
       if (user?.id) {
         try {
-          const response = await fetch(`http://localhost:5000/auth/google/status?userId=${user.id}`);
+          const response = await fetch(`${BACKEND_URL}/auth/google/status?userId=${user.id}`);
           const data = await response.json();
           setIsGoogleCalendarConnected(data.connected);
         } catch (error) {
@@ -263,25 +315,33 @@ function App() {
 
   // Join Call
   const joinCall = useCallback(async () => {
+    console.log('joinCall invoked', { APP_ID, agoraClient });
     if (!agoraClient || !APP_ID) {
-      console.error("Agora client or App ID not initialized.");
+      console.error("Agora client or App ID not initialized.", { APP_ID, agoraClient });
+      setMessages((prev) => [...prev, { sender: 'bot', text: 'Cannot join: Agora client or App ID not initialized. Check console.' }]);
       return;
     }
 
     try {
       const uid = Math.floor(Math.random() * 100000);
-      const tokenResponse = await fetch(`http://localhost:3001/agora/token`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ channelName: CHANNEL, uid: uid }),
+      // Fetch a short-lived Agora RTC token from the backend
+      const tokenUrl = `${BACKEND_URL}/agora-token?channel=${encodeURIComponent(CHANNEL)}&uid=${uid}`;
+      const tokenResponse = await fetch(tokenUrl);
+      if (!tokenResponse.ok) {
+        const text = await tokenResponse.text().catch(() => '<no body>');
+        console.error('Agora token endpoint returned error', tokenResponse.status, text);
+        setMessages((prev) => [...prev, { sender: 'bot', text: `Failed to join: token endpoint error ${tokenResponse.status}` }]);
+        return;
+      }
+      const tokenJson = await tokenResponse.json().catch((e) => {
+        console.error('Failed to parse token JSON', e);
+        return null;
       });
-      const { token } = await tokenResponse.json();
+      const token = tokenJson?.token;
 
       if (!token) {
-        console.error("Failed to fetch Agora token.");
-        setMessages((prev) => [...prev, { sender: "bot", text: "Failed to join the call: Token missing." }]);
+        console.error('Failed to fetch Agora token (missing token in response)', tokenJson);
+        setMessages((prev) => [...prev, { sender: 'bot', text: 'Failed to join the call: Token missing from server response.' }]);
         return;
       }
 
@@ -436,7 +496,7 @@ function App() {
     }));
 
     try {
-      const response = await fetch("http://localhost:5000/chat", {
+      const response = await fetch(`${BACKEND_URL}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages: formattedMessages, userId: user?.id }),
@@ -468,7 +528,7 @@ function App() {
   }, [input, messages, setMessages, setInput, setIsTyping, isTTSActive, user]);
 
   // Send on Enter key
-  const handleKeyPress = (e) => {
+  const handleKeyDown = (e) => {
     if (e.key === "Enter") sendMessage();
   };
 
@@ -480,33 +540,13 @@ function App() {
     // Any other cleanup needed on logout
   };
 
-  const toggleDashboardView = () => {
-    setShowDashboardOnly(prev => !prev);
-  };
-
   const handleGoogleConnect = () => {
     if (user?.id) {
-      window.location.href = `http://localhost:5000/auth/google?userId=${user.id}`;
+      window.location.href = `${BACKEND_URL}/auth/google?userId=${user.id}`;
     } else {
       setGoogleAuthMessage('Please log in to connect Google Calendar.');
     }
   };
-
-  // Framer Motion Variants for containers
-  const chatVariants = {
-    hidden: { opacity: 0, x: -50 },
-    visible: { opacity: 1, x: 0 },
-    exit: { opacity: 0, x: -50, transition: { duration: 0.3 } },
-  };
-
-  // Temporarily commented out dashboardVariants for debugging
-  /*
-  const dashboardVariants = {
-    hidden: { opacity: 0, x: 50 },
-    visible: { opacity: 1, x: 0 },
-    exit: { opacity: 0, x: 50, transition: { duration: 0.3 } },
-  };
-  */
 
   if (!session) {
     return (
@@ -564,13 +604,6 @@ function App() {
               </motion.button>
             </div>
           )}
-          <motion.button 
-            whileTap={{ scale: 0.9 }}
-            onClick={toggleDashboardView}
-            className="toggle-dashboard-btn"
-          >
-            {showDashboardOnly ? "Show Chat" : "Show Dashboard"}
-          </motion.button>
           
           <motion.button 
             whileTap={{ scale: 0.9 }}
@@ -587,15 +620,16 @@ function App() {
           <motion.button whileTap={{ scale: 0.9 }} onClick={handleLogout} className="logout-btn">
             Logout
           </motion.button>
+
+          {isLeadOnline && <p className="lead-online-status">🟢 Lead is Online</p>}
+          {googleAuthMessage && <motion.p 
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+            transition={{ duration: 0.3 }}
+            className="google-auth-message"
+          >{googleAuthMessage}</motion.p>}
         </div>
-        {isLeadOnline && <p className="lead-online-status">🟢 Lead is Online</p>}
-        {googleAuthMessage && <motion.p 
-          initial={{ opacity: 0, y: -10 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -10 }}
-          transition={{ duration: 0.3 }}
-          className="google-auth-message"
-        >{googleAuthMessage}</motion.p>}
       </header>
 
       <div className="main-content-container">
@@ -604,10 +638,6 @@ function App() {
           key="chat-container"
           className="chat-container"
           // Reverted inline styles to let CSS handle sizing
-          variants={chatVariants}
-          initial="hidden"
-          animate="visible"
-          exit="exit"
         >
           <div className="messages-display">
             {messages.map((msg, index) => (
@@ -633,42 +663,6 @@ function App() {
             }
             <div ref={chatEndRef} />
           </div>
-          {inCall && (
-            <div className="video-streams">
-              {localVideoTrack && !isSharingScreen && (
-                <VideoPanel
-                  uid="local-video"
-                  track={localVideoTrack}
-                  isLocal={true}
-                  isAudioMuted={isAudioMuted}
-                  isVideoMuted={isVideoMuted}
-                  onToggleAudio={toggleAudio}
-                  onToggleVideo={toggleVideo}
-                  onLeaveCall={leaveCall}
-                />
-              )}
-              {localScreenTrack && isSharingScreen && (
-                <VideoPanel
-                  uid="local-screen"
-                  track={localScreenTrack}
-                  isLocal={true}
-                  isAudioMuted={isAudioMuted}
-                  isVideoMuted={isVideoMuted}
-                  onToggleAudio={toggleAudio}
-                  onToggleVideo={toggleVideo}
-                  onLeaveCall={leaveCall}
-                />
-              )}
-              {Object.values(remoteUsers).map((user) => (
-                <VideoPanel 
-                  key={user.uid} 
-                  uid={user.uid} 
-                  track={user.screenVideoTrack || user.videoTrack}
-                  isLocal={false} 
-                />
-              ))}
-            </div>
-          )}
           <div className="input-area">
             <input
               className="input-box"
@@ -676,8 +670,28 @@ function App() {
               placeholder="Type your message..."
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              onKeyPress={handleKeyPress}
+              onKeyDown={handleKeyDown}
             />
+              {/* Custom styled file picker */}
+              <div className="file-picker">
+                <label className="file-picker-label" onClick={() => document.getElementById('recording-upload')?.click()}>
+                  <input
+                    id="recording-upload"
+                    type="file"
+                    accept="audio/*,video/*,image/*"
+                    onChange={(e) => setSelectedFile(e.target.files[0])}
+                  />
+                  <span className="file-picker-text">{selectedFile ? selectedFile.name : 'Choose file'}</span>
+                </label>
+                <button
+                  className="upload-btn"
+                  onClick={() => uploadRecording(selectedFile)}
+                  disabled={!selectedFile}
+                  title={selectedFile ? 'Upload and transcribe' : 'Select a file first'}
+                >
+                  Upload
+                </button>
+              </div>
             <motion.button
               className="send-btn"
               whileTap={{ scale: 0.9 }}
@@ -739,41 +753,6 @@ function AuthComponent() {
         {isLogin ? 'Need an account? Sign Up' : 'Already have an account? Login'}
       </button>
       {message && <p className="auth-message">{message}</p>}
-    </div>
-  );
-}
-
-function VideoPanel({ uid, track, isLocal, isAudioMuted, isVideoMuted, onToggleAudio, onToggleVideo, onLeaveCall }) {
-  const videoRef = useRef(null);
-
-  useEffect(() => {
-    if (track && videoRef.current) {
-      track.play(videoRef.current);
-    }
-    return () => {
-      if (track) track.stop();
-    };
-  }, [track]);
-
-  return (
-    <div className="video-panel">
-      <div ref={videoRef} className="video-player"></div>
-      <div className="video-controls">
-        {isLocal && (
-          <>
-            <motion.button whileTap={{ scale: 0.9 }} onClick={onToggleAudio}>
-              {isAudioMuted ? "🔇" : "🔊"}
-            </motion.button>
-            <motion.button whileTap={{ scale: 0.9 }} onClick={onToggleVideo}>
-              {isVideoMuted ? "📷" : "📹"}
-            </motion.button>
-            <motion.button whileTap={{ scale: 0.9 }} onClick={onLeaveCall}>
-              Leave Call
-            </motion.button>
-          </>
-        )}
-        {!isLocal && <p>User: {uid}</p>}
-      </div>
     </div>
   );
 }
